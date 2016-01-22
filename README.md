@@ -1,6 +1,7 @@
 # bower-send
 
-A simple multi-account mail sending script designed for Bower.
+A simple multi-account mail sending script designed for
+[Bower](https://github.com/wangp/bower).
 
 This program is designed to be used as the 'sendmail' script for Bower. It is
 capable of sending mail from multiple accounts, each with different settings
