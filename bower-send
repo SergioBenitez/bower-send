@@ -1,0 +1,220 @@
+#!/usr/bin/env python
+
+"""bower-send: A simple multi-account mail sending script designed for Bower.
+
+This program is designed to be used as the 'sendmail' script for Bower. It is
+capable of sending mail from multiple accounts, each with different settings
+(sendmail, postmail hooks, etc.), based on the 'from:' field of the message. It
+can also be used as a standalone multi-account mail sender with post-send hooks.
+
+OPTIONS
+
+    -d - Debug. Use this to test your configuration without sending mail.
+
+QUICK START
+
+To start using bower-send, do the following:
+
+    1. Install bower-send. Simply download and place the program in your $PATH.
+
+    2. Add 'accounts' to your ~/.config/bower/bower.conf file. They must have
+       the following form:
+
+        [account.<name>]
+          from_address = <address-in-from:-field>
+          sent_folder = <folder-to-place-sent-mail-in>
+          sendmail = <command-to-run-to-send-message>
+          post_sendmail = <command-to-run-after-send>
+          post_post = <command-to-run-after-post_sendmail>
+
+        [account.<name>]
+            ...
+
+        bower-send must be invoked with a message to send in stdin, which
+        Bower does. bower-send will look at the from: header in the message and
+        match the email address there with one of the 'account.' blocks in your
+        configuration. It will then send the message using 'sendmail', perform
+        the 'post_sendmail' hook, and if it exists, perform the 'post_post'
+        hook.
+
+        Note that 'sendmail', 'post_sendmail', and 'post_post' are optional,
+        while 'from_address' and 'sent_folder' are required. The defaults are:
+
+            sendmail = msmtp -t --read-envelope-from
+            post_sendmail = notmuch insert --folder=$sent_folder +sent -new
+            post_post = <undefined: do nothing>
+
+        Note the special $sent_folder syntax. This will be replaced with your
+        `sent_folder` configuration parameter. It may be used in the following
+        configuration parameters: "post_sendmail", "sendmail", and "post_post".
+
+    3. Set the 'sendmail' Bower configuration parameter to 'bower-send'.
+
+    4. Set the 'post_sendmail' Bower configuration parameter to empty.
+
+    5. Done!
+
+EXAMPLES
+
+The following examples illustrate multiple configurations:
+
+    [account.simple]
+      from_address = sb@simple.com
+      sent_folder = simple/Sent
+
+    [account.home]
+      from_address = sergio@myhome.net
+      sent_folder = home/Sent
+      post_sendmail = notmuch insert --folder=$sent_folder
+      post_post = afew -t -n
+
+    [account.work]
+      from_address = sbenitez@work.org
+      sent_folder = work/Sent Items
+      sendmail: msmtp -t --account=work
+      post_sendmail = notmuch insert --folder=$sent_folder
+      post_post = notmuch tag +work -new -- tag:new
+
+The 'simple' account illustrates the minimally required configuration. Any mail
+that is sent from the 'sb@simple.com' address will be sent using the msmtp
+account associated with that address. The default postmail hook is that same as
+Bower's, albeit specific to the account: notmuch insert is called with the
+'sent_folder', the 'sent' tag is added, and the 'new' tag is removed.
+
+The 'home' account adds the 'post_sendmail' and 'post_post' configuration items.
+In this case, the call to notmuch insert does not add the 'sent' tag or remove
+the 'new' tag. The 'post_post' hook, which is run after the 'post_sendmail'
+hook, calls 'afew', which will tag any 'new' mail via a set of rules. I
+personally use a configuration much like this one.
+
+The 'account.work' directly specifies the sendmail command. It's 'post_post'
+hook directly calls notmuch to add the 'work' tag to the just-sent mail and
+remove the 'new' tag.
+
+QUESTIONS, COMMENTS, FEEDBACK
+
+Please open a Github issue for questions, comments, or feedback.
+
+CAVEATS
+
+You'll need python3 to run this program.
+"""
+
+__author__ = "Sergio Benitez"
+__copyright__ = "Copyright 2016, Sergio Benitez"
+__credits__ = ["Sergio Benitez"]
+__license__ = "MIT"
+__version__ = "0.1"
+__maintainer__ = "Sergio Benitez"
+__email__ = "sb .circle-a-symbol. sergio .tiny-period. bz"
+__status__ = "Development"
+
+import configparser, os, sys, subprocess, email.parser, io
+from email.utils import parseaddr
+
+SECTION_KEY = "account"
+DEFAULTS = {
+        'sendmail': "msmtp -t --read-envelope-from",
+        'post_sendmail': "notmuch insert --folder=$sent_folder +sent -new"
+        }
+
+config = configparser.ConfigParser(DEFAULTS)
+config.read([os.path.expanduser('~/.config/bower/bower.conf')])
+
+class Account(object):
+    def __init__(self, section):
+        self.fields = {"section": section, "name": section.split(".", 2)[1]}
+        for (key, value) in config.items(section):
+            self.fields[key] = value
+        if self.check():
+            self.interpolate_fields()
+
+    def interpolate_fields(self):
+        for k, v in self.fields.items():
+            if k in ["post_sendmail", "sendmail", "post_post"]:
+                args = v.split(" ")
+                mapped = map(lambda v: v.replace("$sent_folder",
+                    self.get("sent_folder")), args)
+                self.fields[k] = list(mapped)
+
+    def get(self, item):
+        if item in self.fields:
+            return self.fields[item]
+        return None
+
+    def check(self):
+        if self.get("sent_folder") and self.get("from_address"):
+            return True
+        return False
+
+    def __str__(self):
+        return str.format("[{section}]", section=self.get("section"))
+
+    def debug(self):
+        print(self)
+        for k, v in self.fields.items():
+            print(k, "=", v)
+
+def error_exit(msg):
+    print("Error:", msg)
+    sys.exit(1)
+
+def get_accounts():
+    accounts = []
+    for section in config.sections():
+        if not section.startswith(SECTION_KEY):
+            continue
+        if "." not in section:
+            error_exit("Configuration file is malformed: [account.name]")
+
+        account = Account(section)
+        if not account.check():
+            error_exit(str(account) + " is missing required fields.")
+
+        accounts.append(account)
+
+    return accounts
+
+def get_account_from(email_address):
+    for account in get_accounts():
+        if account.get("from_address") == email_address:
+            return account
+    return None
+
+def handle(message, account):
+    byte_str = message.encode('utf-8')
+    try:
+        subprocess.run(account.get("sendmail"), input=byte_str,
+                stdout=sys.stdout, stderr=sys.stderr, check=True)
+        subprocess.run(account.get("post_sendmail"), input=byte_str,
+                stdout=sys.stdout, stderr=sys.stderr, check=True)
+        if account.get("post_post"):
+            subprocess.run(account.get("post_post"),
+                    stdout=sys.stdout, stderr=sys.stderr, check=True)
+    except subprocess.CalledProcessError as e:
+        error_exit(e.message)
+
+def main(debug):
+    email_parser = email.parser.Parser()
+    message_string = sys.stdin.read()
+
+    message = email_parser.parse(io.StringIO(message_string))
+    from_address = message.get('from')
+    if not from_address:
+        error_exit("Message is malformed.")
+
+    config_account = get_account_from(parseaddr(from_address)[1])
+    if not config_account:
+        error_exit("Could not find account for " + from_address)
+
+    if debug:
+        config_account.debug()
+    else:
+        handle(message_string, config_account)
+
+if __name__ == "__main__":
+    debug = False
+    if len(sys.argv) > 1 and sys.argv[1] == "-d":
+        debug = True
+
+    main(debug)
